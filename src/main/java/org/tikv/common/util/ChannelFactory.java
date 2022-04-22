@@ -56,10 +56,13 @@ public class ChannelFactory implements AutoCloseable {
     protected abstract SslContextBuilder createSslContextBuilder();
 
     public SslContextBuilder reload() {
+      final String threadName = Thread.currentThread().getName();
+      logger.info("check and reload ssl context in thread {}", threadName);
       if (isModified()) {
-        logger.info("reload ssl context");
+        logger.info("reload ssl context in thread {}", threadName);
         return createSslContextBuilder();
       }
+      logger.info("certificate is not modified in thread {}", threadName);
       return null;
     }
   }
@@ -89,6 +92,12 @@ public class ChannelFactory implements AutoCloseable {
       long b = new File(trustPath).lastModified();
 
       boolean changed = this.keyLastModified != a || this.trustLastModified != b;
+      logger.info("key modified at {}, trust modified at {}", a, b);
+      logger.info(
+          "key last modified at {}, trust last modified at {}",
+          this.keyLastModified,
+          this.trustLastModified);
+      logger.info("key or trust changed: {}", changed);
 
       if (changed) {
         this.keyLastModified = a;
@@ -104,7 +113,9 @@ public class ChannelFactory implements AutoCloseable {
       try {
         if (keyPath != null && keyPassword != null) {
           KeyStore keyStore = KeyStore.getInstance("JKS");
-          keyStore.load(new FileInputStream(keyPath), keyPassword.toCharArray());
+          try (FileInputStream fis = new FileInputStream(keyPath)) {
+            keyStore.load(fis, keyPassword.toCharArray());
+          }
           KeyManagerFactory keyManagerFactory =
               KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
           keyManagerFactory.init(keyStore, keyPassword.toCharArray());
@@ -112,7 +123,9 @@ public class ChannelFactory implements AutoCloseable {
         }
         if (trustPath != null && trustPassword != null) {
           KeyStore trustStore = KeyStore.getInstance("JKS");
-          trustStore.load(new FileInputStream(trustPath), trustPassword.toCharArray());
+          try (FileInputStream fis = new FileInputStream(trustPath)) {
+            trustStore.load(fis, trustPassword.toCharArray());
+          }
           TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(PUB_KEY_INFRA);
           trustManagerFactory.init(trustStore);
           builder.trustManager(trustManagerFactory);
@@ -152,6 +165,14 @@ public class ChannelFactory implements AutoCloseable {
       boolean changed =
           this.trustLastModified != a || this.chainLastModified != b || this.keyLastModified != c;
 
+      logger.info("trust modified at {}, chain modified at {}, key modified ", a, b, c);
+      logger.info(
+          "trust last modified at {}, chain last modified at {}, key last modified at {}",
+          this.trustLastModified,
+          this.chainLastModified,
+          this.keyLastModified);
+      logger.info("trust or chain or key changed: {}", changed);
+
       if (changed) {
         this.trustLastModified = a;
         this.chainLastModified = b;
@@ -181,6 +202,7 @@ public class ChannelFactory implements AutoCloseable {
     this.keepaliveTimeout = keepaliveTimeout;
     this.idleTimeout = idleTimeout;
     this.certContext = null;
+    logger.info("Created channel factory without tls");
   }
 
   public ChannelFactory(
@@ -197,6 +219,7 @@ public class ChannelFactory implements AutoCloseable {
     this.idleTimeout = idleTimeout;
     this.certContext =
         new OpenSslContext(trustCertCollectionFilePath, keyCertChainFilePath, keyFilePath);
+    logger.info("Created channel factory without tls using openssl");
   }
 
   public ChannelFactory(
@@ -213,6 +236,7 @@ public class ChannelFactory implements AutoCloseable {
     this.keepaliveTimeout = keepaliveTimeout;
     this.idleTimeout = idleTimeout;
     this.certContext = new JksContext(jksKeyPath, jksKeyPassword, jksTrustPath, jksTrustPassword);
+    logger.info("Created channel factory without tls using jks");
   }
 
   @VisibleForTesting
@@ -224,6 +248,7 @@ public class ChannelFactory implements AutoCloseable {
         return true;
       }
     }
+    logger.info("Channel factory was created without tls");
     return false;
   }
 
@@ -260,10 +285,24 @@ public class ChannelFactory implements AutoCloseable {
                   .idleTimeout(idleTimeout, TimeUnit.SECONDS);
 
           if (certContext == null) {
+            logger.info("establish connection without tls");
             return builder.usePlaintext().build();
           } else {
             SslContext sslContext;
             try {
+              SslContextBuilder sslBuilder = null;
+              final String threadName = Thread.currentThread().getName();
+              logger.info("establish connection with tls in thread {}", threadName);
+              while ((sslBuilder = sslContextBuilder.get()) == null) {
+                logger.info("ssl builder is null in thread {}, keep retrying", threadName);
+                try {
+                  Thread.sleep(100);
+                } catch (InterruptedException e) {
+                  logger.error("interrupted while waiting for ssl builder", e);
+                  throw new RuntimeException(e);
+                }
+              }
+              logger.info("establish connection with tls in thread {}", threadName);
               sslContext = sslContextBuilder.get().build();
             } catch (SSLException e) {
               logger.error("create ssl context failed!", e);
